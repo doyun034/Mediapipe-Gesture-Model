@@ -110,13 +110,13 @@ For more information on MediaPipe Gesture Recognizer, you can check [here](https
 *   **Basic Model Training & Evaluation**:
     Trains a model based on images in `gesture/data/image_data/` and immediately performs a performance evaluation upon completion. The evaluation results are saved in the `gesture/analysis/results/basic_model_evaluation/` folder.
     ```bash
-    python gesture/src/main.py --mode train
+    python -m gesture.src.main --mode train
     ```
 
 *   **Combined Model Update & Evaluation (Incremental Learning)**:
     Updates the model using both existing data and new data from `gesture/data/new_image_data/`, and immediately performs a performance evaluation upon completion. The evaluation results are saved in the `gesture/analysis/results/combine_model_evaluation/` folder.
     ```bash
-    python gesture/src/main.py --mode update
+    python -m gesture.src.main --mode update
     ```
 
 ### 4. Real-time Gesture Recognition (`live_test.py`)

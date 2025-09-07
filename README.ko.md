@@ -119,13 +119,13 @@ MediaPipe Gesture Recognizer에 대한 자세한 정보는 [여기](https://ai.g
 *   **기본 모델 학습 및 평가**:
     `gesture/data/image_data/`의 이미지를 기반으로 모델을 학습시키고, 완료 즉시 성능 평가를 수행합니다. 평가 결과는 `gesture/analysis/results/basic_model_evaluation/` 폴더에 저장됩니다.
     ```bash
-    python gesture/src/main.py --mode train
+    python -m gesture.src.main --mode train
     ```
 
 *   **통합 모델 업데이트 및 평가 (증분 학습)**:
     기존 데이터와 `gesture/data/new_image_data/`의 새로운 데이터를 함께 사용하여 모델을 업데이트하고, 완료 즉시 성능 평가를 수행합니다. 평가 결과는 `gesture/analysis/results/combine_model_evaluation/` 폴더에 저장됩니다.
     ```bash
-    python gesture/src/main.py --mode update
+    python -m gesture.src.main --mode update
     ```
 
 ### 4. 실시간 제스처 인식 (`live_test.py`)
