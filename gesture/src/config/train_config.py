@@ -21,7 +21,7 @@ class TrainConfig:
     # ReduceLROnPlateau: 검증 손실(val_loss) 개선이 없을 때 학습률을 동적으로 감소
     LR_SCHEDULER_MONITOR = 'val_loss'
     LR_SCHEDULER_FACTOR = 0.5
-    LR_SCHEDULER_PATIENCE = 5
+    LR_SCHEDULER_PATIENCE = 1
     LR_SCHEDULER_MIN_LR = 0.00001
 
     # 4. TFLite 변환 설정

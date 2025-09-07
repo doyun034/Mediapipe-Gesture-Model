@@ -56,19 +56,24 @@ class ModelTrainer:
             logger.error("----- 라벨 맵 또는 데이터 경로가 설정되지 않았습니다. 학습을 시작할 수 없습니다")
             return
 
-        X_train, y_train, X_test, y_test, y_train_labels, y_test_labels = self._load_and_prepare_data()
+        (X_train, y_train, X_val, y_val, X_test, y_test,
+        y_train_numeric, y_val_numeric, y_test_numeric) = self._load_and_prepare_data()
+
         num_classes = len(self.label_map)
 
         # 모델 입력 형태를 (데이터 수, 특징 수, 1)로 변환 (Conv1D를 위함)
         input_shape: Tuple[int, int] = (X_train.shape[1], 1)
         X_train = X_train.reshape(-1, *input_shape)
-        X_test = X_test.reshape(-1, *input_shape)
+        X_val   = X_val.reshape(-1, *input_shape)
+        X_test  = X_test.reshape(-1, *input_shape)
 
         model = self.model_builder.build(input_shape, num_classes)
         learning_rate = self.train_config.LEARNING_RATE
-        model.compile(optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate),
-                      loss='categorical_crossentropy',
-                      metrics=['accuracy'])
+        model.compile(
+            optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate),
+            loss='categorical_crossentropy',
+            metrics=['accuracy']
+        )
 
         # 콜백 설정: 조기 종료 및 학습률 동적 조정
         early_stopping = EarlyStopping(
@@ -87,35 +92,55 @@ class ModelTrainer:
         )
 
         # 클래스 불균형 처리를 위한 클래스 가중치 계산
-        unique_classes: np.ndarray = pd.unique(y_train_labels).astype(int)
+        unique_classes: np.ndarray = pd.unique(y_train_numeric).astype(int)
         class_weights: np.ndarray = compute_class_weight(
             class_weight='balanced',
             classes=unique_classes,
-            y=y_train_labels.astype(int) # y_train_labels도 정수형으로 명시적 캐스팅
+            y=y_train_numeric.astype(int)
         )
         class_weights_dict: Dict[int, float] = dict(zip(unique_classes, class_weights))
-        logger.info("----- 클래스 가중치 적용 (클래스 불균형 처리):")
+
         reversed_label_map: Dict[int, str] = {v: k for k, v in self.label_map.items()}
+        logger.info("----- 클래스 가중치 적용 (클래스 불균형 처리):")
         for cls, weight in class_weights_dict.items():
             label_name = reversed_label_map.get(cls, f"Unknown({cls})")
             logger.info(f"----- 라벨 {cls} ({label_name}): 가중치 {weight:.4f}")
 
         logger.info("----- 모델 학습 시작")
-        model.fit(X_train, y_train,
-                  validation_data=(X_test, y_test),
-                  epochs=self.train_config.EPOCHS,
-                  batch_size=self.train_config.BATCH_SIZE,
-                  callbacks=[early_stopping, lr_scheduler],
-                  class_weight=class_weights_dict)  # 계산된 클래스 가중치 적용
+        model.fit(
+            X_train, y_train,
+            validation_data=(X_val, y_val),
+            epochs=self.train_config.EPOCHS,
+            batch_size=self.train_config.BATCH_SIZE,
+            callbacks=[early_stopping, lr_scheduler],
+            class_weight=class_weights_dict
+        )
         logger.info("----- 모델 학습 완료")
 
         if self.model_save_path:
             assert self.model_save_path.endswith(".keras")
             model.save(self.model_save_path)
             logger.info(f"----- Keras 모델 저장 완료: {self.model_save_path}")
-        
+
         loss, acc = model.evaluate(X_test, y_test, verbose=0)
-        logger.info(f"----- 테스트 정확도: {acc:.4f}, 손실: {loss:.4f}")
+        logger.info(f"----- [TEST] 정확도: {acc:.4f}, 손실: {loss:.4f}")
+
+        # --- 상세 리포트 (test 전용) ---
+        from sklearn.metrics import classification_report, confusion_matrix
+        y_prob = model.predict(X_test, verbose=0)
+        y_pred = np.argmax(y_prob, axis=1)
+
+        # label 순서를 id 기준으로 정렬
+        id_to_label = {v: k for k, v in self.label_map.items()}
+        target_names = [id_to_label[i] for i in range(len(self.label_map))]
+
+        report = classification_report(
+            y_test_numeric, y_pred, target_names=target_names, digits=4
+        )
+        cm = confusion_matrix(y_test_numeric, y_pred)
+
+        logger.info("----- [TEST] classification_report\n" + report)
+        logger.info("----- [TEST] confusion_matrix\n" + np.array2string(cm))
 
         # TFLite 변환을 위한 대표 데이터셋 준비 (이미 로드된 학습 데이터 사용)
         if self.tflite_save_path:
@@ -125,69 +150,80 @@ class ModelTrainer:
         """
         Keras 모델을 INT8 양자화된 TFLite 모델로 변환하고 저장
         """
+
         # 1) 대표데이터 형상/채널 가드 (경고/런타임 오류 예방)
         assert X_train_for_tflite.ndim == 3 and X_train_for_tflite.shape[2] == 1
 
         # 표본 수 안전 가드
-        take_n = min(self.train_config.TFLITE_REPRESENTATIVE_DATASET_SAMPLE_SIZE, len(X_train_for_tflite))
+        take_n = min(self.train_config.TFLITE_REPRESENTATIVE_DATASET_SAMPLE_SIZE,
+            len(X_train_for_tflite))
 
         def representative_data_gen():
             # 2) float32 캐스팅 + (1, L, 1) 배치.
             buffer_size = min(len(X_train_for_tflite), self.train_config.TFLITE_SHUFFLE_BUFFER_SIZE)
             dataset = tf.data.Dataset.from_tensor_slices(
                 tf.cast(X_train_for_tflite, tf.float32)
-            ).shuffle(buffer_size
-            ).batch(1
-            ).take(take_n
-            ).prefetch(tf.data.AUTOTUNE)
-
-            for batch in dataset: yield [batch]
+            ).shuffle(buffer_size).batch(1).take(take_n).prefetch(tf.data.AUTOTUNE)
+            for batch in dataset:
+                yield [batch]
 
         converter = tf.lite.TFLiteConverter.from_keras_model(model)
         converter.optimizations = [tf.lite.Optimize.DEFAULT]
         converter.representative_dataset = representative_data_gen
 
-        # 3) 완전 정수화(내부 연산 INT8) + I/O=int8 (코드와 로그 일치)
+        # 완전 정수화 + I/O=int8 (일관성)
         converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS_INT8]
-        converter.inference_input_type  = tf.uint8
-        converter.inference_output_type = tf.uint8
+        converter.inference_input_type  = tf.int8
+        converter.inference_output_type = tf.int8
 
         tflite_quant_model = converter.convert()
-
         with open(self.tflite_save_path, "wb") as f:
             f.write(tflite_quant_model)
 
-        logger.info(f"----- TFLite 모델 저장 완료 (FULL INT, I/O=uint8): {self.tflite_save_path}")
+        logger.info(f"----- TFLite 모델 저장 완료 (FULL INT, I/O=int8): {self.tflite_save_path}")
 
-    def _load_and_prepare_data(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+
+    def _load_and_prepare_data(self) -> Tuple[
+        np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray,
+        np.ndarray, np.ndarray, np.ndarray
+    ]:
         """
-        Numpy 데이터를 로드하고 라벨을 원-핫 인코딩으로 변환하여 학습 준비
+        데이터를 로드하고 train/val/test로 분리하여 원-핫 인코딩까지 반환
 
         Returns:
-            Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]: 
-            X_train, y_train, X_test, y_test, y_train_labels, y_test_labels 튜플
+            X_train, y_train_oh, X_val, y_val_oh, X_test, y_test_oh,
+            y_train_numeric, y_val_numeric, y_test_numeric
         """
         if self.data_path is None:
             raise ValueError("----- 데이터 경로(data_path)가 설정되지 않았습니다")
 
         data = np.load(self.data_path, allow_pickle=True)
-
         X = data[:, :-1].astype(np.float32)
         y_string_labels = data[:, -1].astype(str)
 
         if self.label_map is None:
             raise ValueError("----- 라벨 맵(label_map)이 설정되지 않았습니다")
-        
-        y_numeric_labels = np.array([self.label_map[label] for label in y_string_labels], dtype=int)
 
-        X_train, X_test, y_train_numeric_labels, y_test_numeric_labels = train_test_split(
-            X, y_numeric_labels, 
-            test_size=self.train_config.TEST_SPLIT_SIZE, 
-            random_state=self.train_config.RANDOM_STATE, 
-            stratify=y_numeric_labels
+        y_numeric = np.array([self.label_map[label] for label in y_string_labels], dtype=int)
+
+        X_train_full, X_test, y_train_full, y_test_numeric = train_test_split(
+            X, y_numeric,
+            test_size=self.train_config.TEST_SPLIT_SIZE,
+            random_state=self.train_config.RANDOM_STATE,
+            stratify=y_numeric
         )
 
-        y_train = to_categorical(y_train_numeric_labels, num_classes=len(self.label_map))
-        y_test = to_categorical(y_test_numeric_labels, num_classes=len(self.label_map))
+        X_train, X_val, y_train_numeric, y_val_numeric = train_test_split(
+            X_train_full, y_train_full,
+            test_size=0.2,
+            random_state=self.train_config.RANDOM_STATE,
+            stratify=y_train_full
+        )
 
-        return X_train, y_train, X_test, y_test, y_train_numeric_labels, y_test_numeric_labels
+        num_classes = len(self.label_map)
+        y_train_oh = to_categorical(y_train_numeric, num_classes=num_classes)
+        y_val_oh   = to_categorical(y_val_numeric,   num_classes=num_classes)
+        y_test_oh  = to_categorical(y_test_numeric,  num_classes=num_classes)
+
+        return (X_train, y_train_oh, X_val, y_val_oh, X_test, y_test_oh,
+            y_train_numeric, y_val_numeric, y_test_numeric)
